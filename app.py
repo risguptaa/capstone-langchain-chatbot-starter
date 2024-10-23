@@ -89,9 +89,13 @@ def search_knowledgebase(message):
     return sources
 
 def answer_as_chatbot(message):
-    global chatbot_llm_chain
-    res = chatbot_llm_chain.run(message)
-    return res 
+    template = """Question: {question}
+    Answer as if you are an expert Python developer"""
+    prompt = PromptTemplate(template=template, input_variables=["question"])
+    llm = Cohere(cohere_api_key=os.environ["COHERE_API_KEY"])
+    llm_chain = LLMChain(prompt=prompt, llm=llm)
+    res = llm_chain.run(message)
+    return res
 
 @app.route('/kbanswer', methods=['POST'])
 def kbanswer():
