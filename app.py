@@ -1,23 +1,17 @@
-from flask import Flask, render_template
-from flask import request, jsonify, abort
+from flask import Flask, render_template, request, jsonify
 import logging
+import os
 
 from langchain.llms import Cohere
 from langchain import PromptTemplate, LLMChain
-from langchain.chains import SequentialChain
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import RetrievalQA
 from langchain.embeddings import CohereEmbeddings
 from langchain.vectorstores import Chroma
-import os
 
 app = Flask(__name__)
 
+# Configure logging
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
@@ -25,36 +19,37 @@ logging.basicConfig(level=logging.DEBUG,
 # Set Flask's log level to DEBUG
 app.logger.setLevel(logging.DEBUG)
 
-
+# Global variables
 global chatbot_llm_chain
-global knowledgebase_llm
 global knowledgebase_qa
 
+# Function to set up the chatbot LLM chain
 def setup_chatbot_llm():
     global chatbot_llm_chain
-    template = """
-    You are a chatbot that had a conversation with a human. Consider the previous conversation to answer the new question.
+    try:
+        template = """
+        You are a chatbot that had a conversation with a human. Consider the previous conversation to answer the new question.
 
-    Previous conversation:{chat_history}
-    New human question: {question}
+        Previous conversation: {chat_history}
+        New human question: {question}
 
-    Response:"""
+        Response:"""
+        
+        prompt = PromptTemplate(template=template, input_variables=["question", "chat_history"])
+        llm = Cohere(cohere_api_key=os.environ["COHERE_API_KEY"])
+        memory = ConversationBufferMemory(memory_key="chat_history")
+        chatbot_llm_chain = LLMChain(prompt=prompt, llm=llm, verbose=True, memory=memory)
+        app.logger.debug('Successfully set up chatbot_llm_chain')
+    except Exception as e:
+        app.logger.error(f"Error setting up chatbot_llm_chain: {e}")
+        chatbot_llm_chain = None
 
-    prompt = PromptTemplate(template=template, input_variables=["question", "chat_history"])
-    llm = Cohere(cohere_api_key=os.environ["COHERE_API_KEY"])
-    memory = ConversationBufferMemory(memory_key="chat_history")
-    chatbot_llm_chain = LLMChain(prompt=prompt, llm=llm, verbose=True, memory=memory)
-    
-
+# Function to set up the knowledgebase LLM
 def setup_knowledgebase_llm():
     global knowledgebase_qa
-    app.logger.debug('Setting KB')
+    app.logger.debug('Setting up knowledgebase')
     try:
-        # Used for mathematical rep of the book
         embeddings = CohereEmbeddings(cohere_api_key=os.environ["COHERE_API_KEY"])
-        # db has the textual representation of the book.
-        # we are loading and converting that to a mathematical model and persisting it in the chromaDB
-        # and creating a search index
         vectordb = Chroma(persist_directory='db', embedding_function=embeddings)
         knowledgebase_qa = RetrievalQA.from_chain_type(
             llm=Cohere(),
@@ -62,72 +57,91 @@ def setup_knowledgebase_llm():
             retriever=vectordb.as_retriever(),
             return_source_documents=True
         )
-        print("Successfully setup the KB")
+        app.logger.debug("Successfully set up the knowledgebase")
     except Exception as e:
-        print("Error:", e)
+        app.logger.error(f"Error setting up knowledgebase LLM: {e}")
+        knowledgebase_qa = None
 
-
+# Combined setup function
 def setup():
     setup_chatbot_llm()
     setup_knowledgebase_llm()
 
+# Function to get an answer from the knowledgebase
 def answer_from_knowledgebase(message):
     global knowledgebase_qa
-    app.logger.debug('Before query')
-    res = knowledgebase_qa({"query": message})
-    app.logger.debug('Query successful')
+    if knowledgebase_qa is None:
+        app.logger.error("knowledgebase_qa is not initialized.")
+        return "Knowledgebase is currently unavailable. Please try again later."
+    
+    app.logger.debug('Querying knowledgebase')
+    try:
+        res = knowledgebase_qa({"query": message})
+        app.logger.debug('Query successful')
+        return res['result']
+    except Exception as e:
+        app.logger.error(f"Error querying knowledgebase: {e}")
+        return "Failed to retrieve answer from the knowledgebase."
 
-    return res['result']
-
+# Function to search the knowledgebase
 def search_knowledgebase(message):
     global knowledgebase_qa
-    res = knowledgebase_qa({"query": message})
-    sources = ""
-    for count, source in enumerate(res['source_documents'],1):
-        sources += "Source " + str(count) + "\n"
-        sources += source.page_content + "\n"
-    return sources
+    if knowledgebase_qa is None:
+        app.logger.error("knowledgebase_qa is not initialized.")
+        return "Knowledgebase is currently unavailable."
+    
+    app.logger.debug('Searching knowledgebase')
+    try:
+        res = knowledgebase_qa({"query": message})
+        sources = ""
+        for count, source in enumerate(res['source_documents'], 1):
+            sources += f"Source {count}\n{source.page_content}\n"
+        return sources
+    except Exception as e:
+        app.logger.error(f"Error searching knowledgebase: {e}")
+        return "Failed to search the knowledgebase."
 
+# Function to get an answer from the chatbot
 def answer_as_chatbot(message):
     global chatbot_llm_chain
-    res = chatbot_llm_chain.run(message)
-    return res 
+    if chatbot_llm_chain is None:
+        app.logger.error("chatbot_llm_chain is not initialized.")
+        return "Chatbot is currently unavailable. Please try again later."
+    
+    try:
+        res = chatbot_llm_chain.run(message)
+        return res
+    except Exception as e:
+        app.logger.error(f"Error generating chatbot response: {e}")
+        return "Failed to get a response from the chatbot."
 
+# Route to handle knowledgebase answers
 @app.route('/kbanswer', methods=['POST'])
 def kbanswer():
     message = request.json['message']
-    
-    # Generate a response
     response_message = answer_from_knowledgebase(message)
-    
-    # Return the response as JSON
     return jsonify({'message': response_message}), 200
-    
 
+# Route to handle knowledgebase search
 @app.route('/search', methods=['POST'])
-def search():    
+def search():
     message = request.json['message']
-    
-    # Generate a response
     response_message = search_knowledgebase(message)
-    
-    # Return the response as JSON
     return jsonify({'message': response_message}), 200
 
+# Route to handle chatbot responses
 @app.route('/answer', methods=['POST'])
 def answer():
     message = request.json['message']
-    
-    # Generate a response
     response_message = answer_as_chatbot(message)
-    
-    # Return the response as JSON
     return jsonify({'message': response_message}), 200
 
+# Main index route
 @app.route("/")
 def index():
     return render_template("index.html", title="")
 
+# Main function to start the app
 if __name__ == "__main__":
     setup()
-    app.run(host='0.0.0.0', port=5001)
+    app.run(host='0.0.0.0', port=5001, debug=True)
